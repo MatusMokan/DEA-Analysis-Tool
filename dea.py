@@ -18,18 +18,44 @@ dbc_css = "https://cdn.jsdelivr.net/gh/AnnMarieW/dash-bootstrap-templates/dbc.mi
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.QUARTZ, dbc.icons.FONT_AWESOME, dbc_css], suppress_callback_exceptions=True)
 
 
+import base64
+import io
+
+def parse_contents(contents, filename):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    try:
+        if 'csv' in filename.lower():
+            # Assume that the user uploaded a CSV file
+            df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+        elif 'xls' in filename.lower():
+            # Assume that the user uploaded an Excel file
+            df = pd.read_excel(io.BytesIO(decoded))
+        else:
+            print("File type not supported")
+            return None
+    except Exception as e:
+        print(f"Error parsing file: {e}")
+        return None
+    return df
+    
 # First, update the load_data function to accept a wave parameter
 def load_data(wave=None):
     try:
         if wave:
             # Extract wave number (e.g., "1 vlna" -> "1")
             wave_num = wave.split()[0]
-            file_path = f'data/merged_data_{wave_num}.xlsx'
-            print(f"Loading wave data from: {file_path}")
-            df = pd.read_excel(file_path)
+            if not wave_num.isdigit():
+                file_path = f'data/mel.xlsx'
+                print(f"Loading wave data from: {file_path}")
+                df = pd.read_excel(file_path, sheet_name="Data")
+            else:
+                file_path = f'data/merged_data_{wave_num}.xlsx'
+                print(f"Loading wave data from: {file_path}")
+                df = pd.read_excel(file_path)
         else:
             # Default behavior (load the original file)
-            df = pd.read_csv('data/nmerged_data.csv')
+            df = pd.read_excel('data/merged_data_1.xlsx')
     except Exception as e:
         print(f"Error loading data: {str(e)}")
         # Try to find any CSV in the data folder as fallback
@@ -44,11 +70,21 @@ def load_data(wave=None):
             return pd.DataFrame({'No data found': ['Create data folder with CSV files']})
     
     # Add Projekt column if the DataFrame is not empty
-    if not df.empty and 'Projekt' not in df.columns:
-        # Create project names: project_1, project_2, etc.
-        df.insert(0, 'Projekt', [f"project_{i+1}" for i in range(len(df))])
-    
+    if not df.empty:
+            # Add Projekt column if not present
+            if 'Projekt' not in df.columns:
+                df.insert(0, 'Projekt', [f"project_{i+1}" for i in range(len(df))])
+            # Add 'filter' column if the required columns exist
+            required_cols = {'target_51510', 'final_51510', 'target_52100', 'final_52100', 'target_54000', 'final_54000'}
+            if required_cols.issubset(df.columns):
+                df['filter'] = (
+                    (df['target_51510'] > df['final_51510']).astype(int) +
+                    (df['target_52100'] > df['final_52100']).astype(int) +
+                    (df['target_54000'] > df['final_54000']).astype(int)
+                )
+        
     return df
+
 
 # Load data once at startup
 df = load_data()
@@ -78,11 +114,35 @@ app.layout = html.Div([
                         {"label": "1 vlna", "value": "1 vlna"},
                         {"label": "2 vlna", "value": "2 vlna"},
                         {"label": "3 vlna", "value": "3 vlna"},
+                        {"label": "mel", "value": "mel"},
                     ],
                     value=None,
                     className="mb-3"
                 ),
             ], width=3, className="d-flex flex-column justify-content-end"),
+        ]),
+         # Add file upload dropper
+        dbc.Row([
+            dbc.Col(
+                dcc.Upload(
+                    id='upload-data',
+                    children=html.Div([
+                        "Drag and drop or ", html.A("select a file")
+                    ]),
+                    style={
+                        "width": "100%",
+                        "height": "60px",
+                        "lineHeight": "60px",
+                        "borderWidth": "1px",
+                        "borderStyle": "dashed",
+                        "borderRadius": "5px",
+                        "textAlign": "center",
+                        "margin": "10px"
+                    },
+                    multiple=False
+                ),
+                width=12
+            )
         ]),
         
         dbc.Row([
@@ -93,6 +153,14 @@ app.layout = html.Div([
                         dbc.Button("Reload Data", id="reload-button", color="primary", className="me-2"),
                         dbc.Button("Unselect All", id="unselect-button", color="danger", className="me-2"),
                         dbc.Button("Random Select", id="random-select-button", color="info", className="me-2"),  # Add this line
+                        dbc.Input(
+                            id='random-state-input',
+                            placeholder='Random state (e.g., 42)',
+                            type='number',
+                            value=42,  # default value
+                            className="me-2",
+                            style={'width': '150px'}
+                        ),
                         dbc.Input(
                             id='global-search',
                             placeholder='Search across all columns...',
@@ -164,7 +232,14 @@ app.layout = html.Div([
         
         dbc.Row([
             dbc.Col([
-                html.H3("Selected Data"),
+                dbc.Row([
+                    dbc.Col(html.H3("Selected Data"), width="auto")
+                ]),
+                dbc.Row([
+                    dbc.Col(dbc.Button("Export Selection", id="export-button", color="secondary", className="mb-2"), width="auto"),
+                    dbc.Col(dbc.Button("Export DEA Results", id="export-dea-button", color="secondary", className="mb-2"), width="auto"),
+                ], className="align-items-center"),
+
                 # Selected Data Table
                 html.Div(id="selected-table-container",
                     style={
@@ -177,7 +252,7 @@ app.layout = html.Div([
                             # Header
                             [html.Thead(html.Tr([
                                 html.Th(col) for col in df.columns
-                            ]))]+
+                            ]))] +
                             # Body - will be filled by callback
                             [html.Tbody(id="selected-table-body")],
                             bordered=True,
@@ -186,7 +261,10 @@ app.layout = html.Div([
                             id="selected-table",
                             className="mb-4"
                         ),
-                ]),
+                    ]
+                ),
+                dcc.Download(id="download-dea-xlsx"),
+                dcc.Download(id="download-dataframe-xlsx")
             ], width=12),
         ], className="mb-2"),
         
@@ -274,32 +352,25 @@ app.layout = html.Div([
      Input("selected-rows-store", "data")]  # Added selected rows as input
 )
 def update_source_table(data, page_size, page_number, sort_data, selected_rows):
-    # Rest of the function remains the same
     if not data:
         return [], "No data available", []
     
-    # Convert to DataFrame
     df = pd.DataFrame(data)
     
-    # Apply sorting if specified
-    if sort_data and sort_data["column"]:
+    # Apply sorting if specified and if the column exists in the DataFrame
+    if sort_data and sort_data["column"] and sort_data["column"] in df.columns:
         ascending = sort_data["direction"] == "asc"
         df = df.sort_values(by=sort_data["column"], ascending=ascending)
     
-    # Calculate pagination
     page_size = int(page_size)
     page_number = int(page_number)
     total_pages = math.ceil(len(df) / page_size)
-    
-    # Update page dropdown options
     page_options = [{"label": str(i+1), "value": str(i)} for i in range(total_pages)]
     
-    # Slice the data for the current page
     start_idx = page_number * page_size
     end_idx = min(start_idx + page_size, len(df))
     page_data = df.iloc[start_idx:end_idx]
     
-    # Create table rows with checkboxes
     rows = []
     for i, (_, row) in enumerate(page_data.iterrows()):
         row_idx = start_idx + i
@@ -308,19 +379,17 @@ def update_source_table(data, page_size, page_number, sort_data, selected_rows):
         checkbox = html.Td(dbc.Checkbox(
             id={"type": "row-checkbox", "index": row_idx},
             className="row-checkbox",
-            value=is_selected  # Set checkbox state based on selection
+            value=is_selected
         ))
         
         cells = [checkbox] + [html.Td(row[col]) for col in df.columns]
         rows.append(html.Tr(
-            cells, 
+            cells,
             id={"type": "table-row", "index": row_idx},
-            className="selected-row" if is_selected else ""  # Optional: add class for styling
+            className="selected-row" if is_selected else ""
         ))
     
-    # Page info text
     page_info = f"Showing {start_idx + 1} to {end_idx} of {len(df)} entries"
-    
     return rows, page_info, page_options
 #
 # 1. Modify this callback to break the dependency on selected-rows-store
@@ -352,48 +421,57 @@ def update_select_all_state(page_size, page_number, filtered_data, selected_rows
     all_selected = all(idx in selected_rows for idx in current_page_indices)
     
     return all_selected
-
-# Then update the callback to include wave-selector as an input
-# Fix the filtered data callback
 @app.callback(
     [Output("filtered-data-store", "data"),
      Output("selected-rows-store", "data", allow_duplicate=True),
      Output("page-number-dropdown", "value")],
     [Input("wave-selector", "value"),
      Input("reload-button", "n_clicks"),
-     Input("global-search", "value")],
-    prevent_initial_call=True  # Changed from False to True
+     Input("global-search", "value"),
+     Input("upload-data", "contents")],
+    [State("upload-data", "filename")],
+    prevent_initial_call=True
 )
-def update_filtered_data(selected_wave, n_clicks, search_term):
+def update_filtered_data(selected_wave, n_clicks, search_term, uploaded_contents, filename):
     ctx = callback_context
     trigger = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
-    
-    # Load data based on the selected wave
-    if trigger == "wave-selector" or trigger == "reload-button" or trigger is None:
-        df = load_data(selected_wave)
+
+    # If a file is uploaded, use its contents.
+    if trigger == "upload-data" and uploaded_contents:
+        df = parse_contents(uploaded_contents, filename)
+        if df is None:
+            # Fallback to load_data if parsing fails
+            df = load_data(selected_wave)
+        else:
+            # Add Projekt column if not present
+            if 'Projekt' not in df.columns:
+                df.insert(0, 'Projekt', [f"project_{i+1}" for i in range(len(df))])
+            # Add filter column if required columns exist
+            required_cols = {'target_51510', 'final_51510', 'target_52100', 'final_52100', 'target_54000', 'final_54000'}
+            if required_cols.issubset(df.columns):
+                df['filter'] = (
+                    (df['target_51510'] > df['final_51510']).astype(int) +
+                    (df['target_52100'] > df['final_52100']).astype(int) +
+                    (df['target_54000'] > df['final_54000']).astype(int)
+                )
     else:
-        # For search, use current data
+        # Load data based on selected wave or reload button
         df = load_data(selected_wave)
     
     # Apply search filter if provided
     if search_term:
-        # Create a filter mask that checks all columns
         filter_mask = pd.Series(False, index=df.index)
         for col in df.columns:
-            # Convert column to string and check if it contains the search term (case insensitive)
             filter_mask = filter_mask | df[col].astype(str).str.contains(search_term, case=False, na=False)
-        
-        # Apply the filter
         filtered_df = df[filter_mask]
         return filtered_df.to_dict('records'), [], "0"  # Reset selected rows and page
     
     return df.to_dict('records'), [], "0"  # Reset selected rows and page
-# Add this to your dcc.Store components
-# Store components to track state
 
 # Modified row selection callback with random selection by region
 @app.callback(
     Output("selected-rows-store", "data", allow_duplicate=True),
+    Output("dea-results-store", "data", allow_duplicate=True),
     [Input({"type": "row-checkbox", "index": dash.dependencies.ALL}, "value"),
      Input("unselect-button", "n_clicks"),
      Input("random-select-button", "n_clicks"),
@@ -402,19 +480,22 @@ def update_filtered_data(selected_wave, n_clicks, search_term):
      State("filtered-data-store", "data"),
      State("page-size-dropdown", "value"),
      State("page-number-dropdown", "value"),
-     State("selected-rows-store", "data")],
-    prevent_initial_call=True  # Changed from False to True
+     State("selected-rows-store", "data"),
+     State("random-state-input", "value"),
+     State("dea-results-store", "data")],  # Added new random state input here
+    prevent_initial_call=True
 )
 def update_selected_rows(checked_values, unselect_clicks, random_select_clicks, select_all_action, 
-                         checkbox_ids, filtered_data, page_size, page_number, current_selected):
+                         checkbox_ids, filtered_data, page_size, page_number, current_selected, random_state, dea_results):
     ctx = callback_context
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     
     # Handle unselect all button
     if trigger == "unselect-button":
-        return []
+        return [], dea_results
     
     # Handle random select by region button (NEW FUNCTIONALITY)
+    # Modified part of your callback:
     if trigger == "random-select-button":
         try:
             # Convert to DataFrame
@@ -423,7 +504,7 @@ def update_selected_rows(checked_values, unselect_clicks, random_select_clicks, 
             # Check if 'Kraj' column exists
             if 'Kraj' not in df.columns:
                 print("Error: 'Kraj' column not found in data")
-                return current_selected  # Keep current selection if no Kraj column
+                return current_selected, []  # Keep current selection if no Kraj column
             
             # Get unique values in the 'Kraj' column
             unique_regions = df['Kraj'].unique()
@@ -432,32 +513,25 @@ def update_selected_rows(checked_values, unselect_clicks, random_select_clicks, 
             # Initialize list to store selected indices
             selected_indices = []
             
-            # For each unique region, randomly select 3 rows
+            # For each unique region, randomly select 3 rows using the provided random state
             for region in unique_regions:
-                # Get indices of rows for this region
                 region_rows = df[df['Kraj'] == region]
-                
                 if len(region_rows) > 0:
-                    # Determine how many samples to take (min of 3 or available rows)
                     n_samples = min(3, len(region_rows))
-                    
-                    # Select random rows from this region
-                    selected_rows = region_rows.sample(n=n_samples)
-                    
-                    # Find these rows in the original filtered_data list
+                    selected_rows = region_rows.sample(n=n_samples, random_state=int(random_state) if random_state is not None else 42)
                     for idx in selected_rows.index:
-                        # Map DataFrame index to position in filtered_data
                         position = list(df.index).index(idx)
                         selected_indices.append(position)
             
             print(f"Selected {len(selected_indices)} rows across {len(unique_regions)} regions")
-            return selected_indices
-        
+            # Clear the DEA results here by returning an empty list
+            return selected_indices, []  
+            
         except Exception as e:
             print(f"Error in random selection by region: {str(e)}")
             import traceback
             traceback.print_exc()
-            return current_selected  # Keep current selection if error occurs
+            return current_selected, []  # Keep current selection if error occurs
     
     # Handle select all action
     if trigger == "select-all-action":
@@ -470,7 +544,7 @@ def update_selected_rows(checked_values, unselect_clicks, random_select_clicks, 
             end_idx = min(start_idx + page_size, len(filtered_data))
             
             # Add all indices from current page
-            return current_selected + list(range(start_idx, end_idx))
+            return current_selected + list(range(start_idx, end_idx)), dea_results
         elif select_all is False:  # Explicitly False, not None
             # Remove all indices from current page
             page_size = int(page_size)
@@ -478,7 +552,7 @@ def update_selected_rows(checked_values, unselect_clicks, random_select_clicks, 
             start_idx = page_number * page_size
             end_idx = min(start_idx + page_size, len(filtered_data))
             
-            return [idx for idx in current_selected if idx < start_idx or idx >= end_idx]
+            return [idx for idx in current_selected if idx < start_idx or idx >= end_idx], dea_results
     
     # Handle individual checkboxes
     if "row-checkbox" in trigger:
@@ -489,9 +563,11 @@ def update_selected_rows(checked_values, unselect_clicks, random_select_clicks, 
                 row_idx = checkbox_ids[i]["index"]
                 selected_indices.append(row_idx)
         
-        return selected_indices
+        return selected_indices, dea_results
     
-    return current_selected
+    return current_selected, dea_results
+
+
 # 2. Add this callback for the select-all checkbox to directly update selections
 @app.callback(
     Output("select-all-action", "data"),
@@ -536,15 +612,13 @@ def update_selected_table(selected_indices, filtered_data, dea_results):
     if not selected_indices or not filtered_data:
         return []
     
-    # If DEA results are available, use those instead of filtered data
-    if dea_results is not None:
-        # Use the DEA processed data
+    # Use DEA results only if not empty
+    if dea_results and len(dea_results) > 0:
         rows = []
         df = pd.DataFrame(dea_results)
         for _, row in df.iterrows():
             cells = [html.Td(row[col]) for col in df.columns]
             rows.append(html.Tr(cells))
-        
         return rows
     
     # Otherwise use the original data
@@ -555,7 +629,6 @@ def update_selected_table(selected_indices, filtered_data, dea_results):
     if selected_df.empty:
         return []
     
-    # Create table rows
     rows = []
     for _, row in selected_df.iterrows():
         cells = [html.Td(row[col]) for col in df.columns]
@@ -570,7 +643,7 @@ def update_selected_table(selected_indices, filtered_data, dea_results):
      Input("filtered-data-store", "data")]
 )
 def update_selected_table_header(dea_results, filtered_data):
-    if dea_results is not None:
+    if dea_results and len(dea_results) > 0:
         # Get columns from DEA results
         columns = pd.DataFrame(dea_results).columns
     else:
@@ -581,14 +654,14 @@ def update_selected_table_header(dea_results, filtered_data):
         dbc.Table(
             [html.Thead(html.Tr([
                 html.Th(col) for col in columns
-            ]))]+
+            ]))] +
             [html.Tbody(id="selected-table-body")],
             bordered=True,
             hover=True,
             responsive=True,
             id="selected-table",
             className="mb-4"
-        ),
+        )
     ])
 
 # Callback to handle column sorting
@@ -955,7 +1028,69 @@ def create_dea_3d_graph(n_clicks, dea_results, output_choice):
         )
   
 
-# Remove or comment out your existing update_filtered_data callback as it will conflict
-     
+@app.callback(
+    Output("download-dataframe-xlsx", "data"),
+    Input("export-button", "n_clicks"),
+    State("selected-rows-store", "data"),
+    State("filtered-data-store", "data"),
+    State("random-state-input", "value"),
+    prevent_initial_call=True
+)
+def export_selection(n_clicks, selected_rows, filtered_data, random_state):
+    if not selected_rows or not filtered_data:
+        raise dash.exceptions.PreventUpdate
+
+    # Build DataFrame using the selected indices
+    df_filtered = pd.DataFrame(filtered_data)
+    df_export = df_filtered.iloc[selected_rows]
+
+    filename = f"df_output_{random_state}.xlsx"
+    return dcc.send_data_frame(df_export.to_excel, filename, index=False)
+
+
+@app.callback(
+    Output("download-dea-xlsx", "data"),
+    Input("export-dea-button", "n_clicks"),
+    State("dea-results-store", "data"),
+    State("random-state-input", "value"),
+    prevent_initial_call=True
+)
+def export_dea_results(n_clicks, dea_results, random_state):
+    if not dea_results:
+        raise dash.exceptions.PreventUpdate
+
+    df_dea = pd.DataFrame(dea_results)
+    filename = f"df_dea_output_{random_state}.xlsx"
+    return dcc.send_data_frame(df_dea.to_excel, filename, index=False)
+
+
+
+# @app.callback(
+#     Output("filtered-data-store", "data"),
+#     Input("upload-data", "contents"),
+#     State("upload-data", "filename")
+# )
+# def update_from_upload(contents, filename):
+#     if contents is None:
+#         raise dash.exceptions.PreventUpdate
+    
+#     df = parse_contents(contents, filename)
+#     if df is None:
+#         raise dash.exceptions.PreventUpdate
+    
+#     # Add Projekt column if not present
+#     if 'Projekt' not in df.columns:
+#         df.insert(0, 'Projekt', [f"project_{i+1}" for i in range(len(df))])
+    
+#     # Add 'filter' column if the required columns exist
+#     required_cols = {'target_51510', 'final_51510', 'target_52100', 'final_52100', 'target_54000', 'final_54000'}
+#     if required_cols.issubset(df.columns):
+#         df['filter'] = (
+#             (df['target_51510'] > df['final_51510']).astype(int) +
+#             (df['target_52100'] > df['final_52100']).astype(int) +
+#             (df['target_54000'] > df['final_54000']).astype(int)
+#         )
+#     return df.to_dict("records")
+
 if __name__ == '__main__':
     app.run(debug=True, port=8050)
