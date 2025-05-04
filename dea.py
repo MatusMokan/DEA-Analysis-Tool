@@ -10,7 +10,10 @@ import time
 import plotly.graph_objects as go
 # Import funkcie 'dea' zo správneho modulu
 from dealib.dea.core._dea import dea
+# Add this import along with your other imports
+from dealib.dea.core._sdea import sdea
 import numpy as np
+from icecream import ic
 
 dbc_css = "https://cdn.jsdelivr.net/gh/AnnMarieW/dash-bootstrap-templates/dbc.min.css"
 
@@ -98,6 +101,7 @@ app.layout = html.Div([
     dcc.Store(id="current-sort", data={"column": None, "direction": None}),
     dcc.Store(id="select-all-action", data={"action": None, "timestamp": 0}),  # Add this line here
     dcc.Store(id="dea-results-store", data=None),  # Add this to your app.layout after the other Store components
+    dcc.Store(id="dea-results-se", data=None),     # new store to hold DEA superefficiency results
 
 
     dbc.Container([
@@ -336,6 +340,43 @@ app.layout = html.Div([
                 ])
             ]),
         ], width=12),
+    ]),
+
+    #   New row: DEA Super Efficiency Table
+
+    
+    dbc.Row([
+                # New Row: Button to Compute DEA Superefficiency
+        dbc.Row([
+            dbc.Col([
+                dbc.Button("Compute DEA Superefficiency", id="compute-dea-button", color="primary", className="mb-2")
+            ], width=12)
+        ]),
+
+        dbc.Col([
+            html.H3("DEA Super Efficiency Results", className="mt-4 container"),
+            html.Div(
+                id="selected-table-container-se",
+                style={
+                    "max-height": "500px",
+                    "overflow-y": "auto",
+                    "position": "relative"  # For fixed header positioning
+                },
+                children=[
+                    dbc.Table(
+                        [html.Thead(html.Tr([html.Th(col) for col in df.columns]))] +
+                        [html.Tbody(id="selected-table-body-se")],
+                        bordered=True,
+                        hover=True,
+                        responsive=True,
+                        striped=True,
+                        id="selected-table-se",
+                        className="mb-4"
+                    )
+                ]
+            ),
+            dcc.Download(id="download-dea-se-xlsx"),
+        ], width=12)
     ]),
 
 ])
@@ -1091,6 +1132,210 @@ def export_dea_results(n_clicks, dea_results, random_state):
 #             (df['target_54000'] > df['final_54000']).astype(int)
 #         )
 #     return df.to_dict("records")
+
+
+import numpy as np
+import pandas as pd
+# Ensure that sdea is imported from the superefficiency module:
+from dealib.dea.core._sdea import sdea
+
+def compute_super_efficiency(df, input_col, output_cols, rts="vrs", orientation="output", direct=None, transpose=False):
+    """
+    Compute super-efficiency measures for DMU using sdea from dealib.
+
+    Parameters:
+      df: DataFrame containing at least the following columns:
+          - input_col: name of the input column (e.g., "I1")
+          - output_cols: list of output column names (e.g., ["O1", "O2", "O3"])
+          - is_efficient: indicator (if already available; optional)
+      rts: Returns-to-scale assumption. Default is "vrs".
+      orientation: Efficiency orientation. Default is "input".
+      direct: Optional directional parameter for sdea. Default is None.
+      transpose: Boolean flag indicating if the data should be transposed. Default is False.
+
+    Returns:
+      new_df: DataFrame with a new column "super_efficiency" containing the computed scores.
+      eff_result: The Efficiency object returned by sdea.
+    """
+    # Build the arrays for inputs and outputs.
+    x = df[[input_col]].to_numpy()          # shape: (n, 1)
+    y = df[output_cols].to_numpy()            # shape: (n, len(output_cols))
+    
+    # Call sdea to compute super-efficiency measures.
+    eff_result = sdea(x, y, rts=rts, orientation=orientation, direct=direct, transpose=transpose)
+    
+    # Add the results to a copy of the DataFrame.
+    new_df = df.copy()
+    new_df['super_efficiency'] = eff_result.eff
+    
+    return new_df, eff_result
+
+
+# @app.callback(
+#     [Output("dea-results-se", "data"),
+#      Output("selected-table-body-se", "children")],
+#     Input("compute-dea-button", "n_clicks"),
+#     State("dea-results-store", "data")
+# )
+# def update_super_efficiency_and_table(n_clicks, dea_data):
+#     # When the button hasn't been clicked or no DEA data is available, do not update.
+#     if not n_clicks or not dea_data or len(dea_data) == 0:
+#         raise dash.exceptions.PreventUpdate
+
+#     # Convert stored DEA results data into a DataFrame.
+#     df_current = pd.DataFrame(dea_data)
+    
+#     print(df_current.head(3))
+
+#     # Compute superefficiency using your function.
+#     new_df, sup_eff_result = compute_super_efficiency(
+#         df_current,
+#         input_col="I1",
+#         output_cols=["O1", "O2", "O3"],
+#         rts="vrs",
+#         orientation="input"
+#     )
+    
+#     print("Superefficiency results:")
+#     print(sup_eff_result)
+
+#     # Debug print the updated DataFrame.
+#     print("Superefficiency updated:")
+#     print(new_df[['I1', 'O1', 'O2', 'O3', 'super_efficiency']])
+    
+#     # Build table rows from the updated DataFrame.
+#     if new_df.empty:
+#         table_rows = [html.Tr([html.Td("No DEA superefficiency results available", colSpan=len(new_df.columns))])]
+#     else:
+#         table_rows = []
+#         for _, row in new_df.iterrows():
+#             cells = [html.Td(row[col]) for col in new_df.columns]
+#             table_rows.append(html.Tr(cells))
+    
+#     # Return both the updated DEA superefficiency data (as records) and the table rows.
+#     return new_df.to_dict('records'), table_rows
+
+
+# ---- Function to Build Excel-Like DEA Table ----
+def build_dea_excel_table(df_result, eff_result, dmu_name_col="Projekt"):
+    """
+    Build an Excel-style table for DEA superefficiency.
+    
+    For each DMU (row), it creates:
+      - DMU No.
+      - DMU Name (from dmu_name_col if available)
+      - Super Efficiency (rounded)
+      - Optimal Lambdas: a string listing benchmarks (from the non-zero entries in eff_result.lambdas)
+    
+    Returns a DataFrame representing the table.
+    """
+    n_dmu = len(eff_result.eff)
+    table_rows = []
+    for i in range(n_dmu):
+        dmu_no = i + 1
+        # DMU name from the DataFrame if available
+        if dmu_name_col in df_result.columns:
+            dmu_name = df_result.iloc[i][dmu_name_col]
+        else:
+            dmu_name = f"DMU_{dmu_no}"
+        sup_eff = round(eff_result.eff[i], 4)
+        
+        # Extract lambdas for DMU i
+        row_lambdas = eff_result.lambdas[i]  # a 1D numpy array
+        refs = []
+        for j, lam in enumerate(row_lambdas):
+            if lam > 1e-6:  # threshold to avoid numerical noise
+                # DMU name for benchmark j
+                if dmu_name_col in df_result.columns:
+                    ref_name = df_result.iloc[j][dmu_name_col]
+                else:
+                    ref_name = f"DMU_{j+1}"
+                refs.append(f"{ref_name}({lam:.3f})")
+        refs_str = ", ".join(refs)
+        
+        table_rows.append({
+            "DMU No.": dmu_no,
+            "DMU Name": dmu_name,
+            "Super Efficiency": sup_eff,
+            "Optimal Lambdas": refs_str
+        })
+    
+    return pd.DataFrame(table_rows)
+
+@app.callback(
+    [Output("dea-results-se", "data"),
+     Output("selected-table-body-se", "children"),
+     Output("selected-table-container-se", "children")],
+    Input("compute-dea-button", "n_clicks"),
+    State("dea-results-store", "data")
+)
+def update_super_efficiency_and_table(n_clicks, dea_data):
+    # When the button hasn't been clicked or no DEA data is available, do not update.
+    if not n_clicks or not dea_data or len(dea_data) == 0:
+        raise dash.exceptions.PreventUpdate
+
+    # Convert stored DEA results data into a DataFrame.
+    df_current = pd.DataFrame(dea_data)
+    
+    # Compute superefficiency using your function.
+    new_df, sup_eff_result = compute_super_efficiency(
+        df_current,
+        input_col="I1",
+        output_cols=["O1", "O2", "O3"],
+        rts="vrs",
+        orientation="output"
+    )
+    
+    # PrintSuperefficiency results
+    print("Superefficiency results:")
+    ic(sup_eff_result)
+
+    print(sup_eff_result.eff[0])
+
+    # Build an Excel-like table (DataFrame) from the super-efficiency results
+    excel_table = build_dea_excel_table(df_current, sup_eff_result, dmu_name_col="Projekt")
+
+    # Take the super_efficiency column from new_df and add it to the original data.
+    df_result = df_current.copy()
+    df_result['super_efficiency'] = excel_table['Super Efficiency']
+    df_result['Optimal Lambdas'] = excel_table['Optimal Lambdas']
+    
+
+    
+    # print("Superefficiency added to results:")
+    # print(df_result[['Projekt', 'I1', 'efficiency', 'super_efficiency']].head())
+    
+    
+    # Build table rows showing the results with super_efficiency.
+    if df_result.empty:
+        table_rows = [html.Tr([html.Td("No DEA superefficiency results available")])]
+    else:
+        table_rows = []
+        for _, row in df_result.iterrows():
+            cells = [html.Td(row[col]) for col in df_result.columns]
+            table_rows.append(html.Tr(cells))
+    
+    # Create a new table header from the updated df_result columns.
+    table_header = html.Thead(html.Tr([html.Th(col) for col in df_result.columns]))
+    
+    # Build the full table.
+    table = dbc.Table(
+        [table_header] + [html.Tbody(table_rows)],
+        bordered=True,
+        hover=True,
+        responsive=True,
+        striped=True,
+        id="selected-table-se",
+        className="mb-4"
+    )
+    
+    
+    # Save the table as CSV
+    # csv_filename = "dea_superefficiency_table.csv"
+    # excel_table.to_csv(csv_filename, index=False)
+
+    # Return the updated data, table rows, and complete table container.
+    return df_result.to_dict('records'), table_rows, table
 
 if __name__ == '__main__':
     app.run(debug=True, port=8050)
